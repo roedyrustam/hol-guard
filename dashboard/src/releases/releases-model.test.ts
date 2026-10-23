@@ -11,17 +11,25 @@ import {
   groupChangesByKind,
   hasNextPage,
   hasPreviousPage,
-  installedNote,
+  changeCountLabel,
   installedRelease,
+  installedStanding,
   isRetryable,
   isWhatsNewDismissed,
   openingSlug,
   normalizeVersionLabel,
   pageRangeLabel,
+  standingCopy,
   verificationLabel,
   whatsNewStorageKey,
+  contributorMonogram,
+  mergeContributors,
+  contributorTone,
+  dedupeChanges,
+  groupReleaseAssets,
+  groupReleasesByTrain,
 } from "./releases-model";
-import type { ReleaseChange, ReleaseIndex, ReleaseSummary } from "./releases-types";
+import type { ReleaseChange, ReleaseContributor, ReleaseIndex, ReleaseSummary } from "./releases-types";
 
 function installLocalStorage(): Map<string, string> {
   const store = new Map<string, string>();
@@ -122,14 +130,131 @@ function change(kind: ReleaseChange["kind"], id: string): ReleaseChange {
   assert.doesNotThrow(() => dismissWhatsNew("3.53.0"));
 }
 
-// A device can be many releases behind, and the archive is paged. Saying the
-// installed version is not on this page beats a page that marks nothing.
+// Where this device stands is the fact the screen leads with, so it is the
+// fact with the most ways to be wrong. A device can be many releases behind,
+// the archive is paged, and only the first page knows which release is newest.
 {
-  const releases = [summary(), summary({ slug: "v3-52-0", versionLabel: "3.52.0" })];
-  assert.equal(installedNote(releases, "v3.53.0"), " This device is running 3.53.0.");
-  assert.match(installedNote(releases, "3.0.57"), /not on this page of the archive/);
-  assert.equal(installedNote(releases, null), "");
-  assert.equal(installedNote(releases, "  "), "");
+  const releases = [
+    summary(),
+    summary({ slug: "v3-52-0", versionLabel: "3.52.0" }),
+    summary({ slug: "v3-51-0", versionLabel: "3.51.0" }),
+  ];
+  const page1: ReleaseIndex = {
+    kind: "index",
+    page: 1,
+    pageSize: 20,
+    total: 23,
+    totalPages: 2,
+    generatedAt: "2026-10-21T00:00:00Z",
+    releases,
+  };
+
+  assert.deepEqual(installedStanding(page1, null), { kind: "unknown" });
+  assert.deepEqual(installedStanding(page1, "  "), { kind: "unknown" });
+  assert.deepEqual(installedStanding(page1, "3.0.57"), { kind: "off-page", label: "3.0.57" });
+
+  // The newest row on the first page is the newest release there is.
+  const current = installedStanding(page1, "v3.53.0");
+  assert.equal(current.kind, "current");
+
+  const behind = installedStanding(page1, "3.51.0");
+  assert.equal(behind.kind, "behind");
+  assert.equal(behind.kind === "behind" ? behind.behind : -1, 2);
+  assert.equal(
+    behind.kind === "behind" ? behind.newest?.versionLabel : null,
+    "3.53.0",
+    "the first page knows which release is newest",
+  );
+
+  // On a later page the count carries every page before it, and no row on
+  // that page may be passed off as the newest release.
+  const page2: ReleaseIndex = { ...page1, page: 2 };
+  const deep = installedStanding(page2, "3.52.0");
+  assert.equal(deep.kind === "behind" ? deep.behind : -1, 21);
+  assert.equal(deep.kind === "behind" ? deep.newest : "unset", null);
+
+  assert.match(standingCopy({ kind: "unknown" }).title, /published releases/);
+  assert.match(standingCopy(installedStanding(page1, "3.0.57")).body, /not on this page/);
+  assert.match(standingCopy(current).body, /newest published release/);
+  assert.match(standingCopy(behind).body, /2 newer releases have been published since\./);
+  assert.match(standingCopy(behind).body, /The newest stable release is 3\.53\.0\./);
+  assert.match(
+    standingCopy(installedStanding(page1, "3.52.0")).body,
+    /One newer release has been published since\./,
+    "one is not said as 1",
+  );
+  assert.equal(standingCopy(deep).body.includes("The newest"), false);
+}
+
+// The call to read the notes names a release this device is offered. A stable
+// install is not sent to a preview's notes; a device already on previews takes
+// whichever channel published next.
+{
+  const mixed: ReleaseIndex = {
+    kind: "index",
+    page: 1,
+    pageSize: 20,
+    total: 3,
+    totalPages: 1,
+    generatedAt: "2026-10-21T00:00:00Z",
+    releases: [
+      summary({ slug: "v3-54-0rc1", versionLabel: "3.54.0rc1", channel: "preview" }),
+      summary({ slug: "v3-53-0", versionLabel: "3.53.0" }),
+      summary({ slug: "v3-52-0", versionLabel: "3.52.0" }),
+    ],
+  };
+
+  const stable = installedStanding(mixed, "3.52.0");
+  assert.equal(
+    stable.kind === "behind" ? stable.newest?.versionLabel : null,
+    "3.53.0",
+    "a stable install skips the preview above it",
+  );
+  assert.equal(
+    stable.kind === "behind" ? stable.behind : -1,
+    2,
+    "the count still covers every release published since",
+  );
+  assert.match(standingCopy(stable).body, /The newest stable release is 3\.53\.0\./);
+
+  const onPreviews: ReleaseIndex = {
+    ...mixed,
+    releases: [
+      summary({ slug: "v3-54-0", versionLabel: "3.54.0" }),
+      summary({ slug: "v3-53-0rc1", versionLabel: "3.53.0rc1", channel: "preview" }),
+    ],
+  };
+  const preview = installedStanding(onPreviews, "3.53.0rc1");
+  assert.equal(
+    preview.kind === "behind" ? preview.newest?.versionLabel : null,
+    "3.54.0",
+    "a device on previews is offered the stable release above it",
+  );
+
+  // Nothing above a stable install but previews: the band states the gap and
+  // offers no release to open.
+  const previewsOnly: ReleaseIndex = {
+    ...mixed,
+    releases: [
+      summary({ slug: "v3-54-0rc1", versionLabel: "3.54.0rc1", channel: "preview" }),
+      summary({ slug: "v3-53-0", versionLabel: "3.53.0" }),
+    ],
+  };
+  const stranded = installedStanding(previewsOnly, "3.53.0");
+  assert.equal(stranded.kind === "behind" ? stranded.newest : "unset", null);
+  assert.match(standingCopy(stranded).body, /One newer release has been published since\.$/);
+}
+
+// The tally names what is in a release before a word of it is read, in the
+// same order the sections run.
+{
+  const changes: ReleaseChange[] = [
+    { id: "a", kind: "fixed", summary: "One", evidenceUrl: null },
+    { id: "b", kind: "security", summary: "Two", evidenceUrl: null },
+    { id: "c", kind: "fixed", summary: "Three", evidenceUrl: null },
+  ];
+  assert.equal(changeCountLabel(groupChangesByKind(changes)), "1 security \u00b7 2 fixed");
+  assert.equal(changeCountLabel([]), "");
 }
 
 // Coverage is published, not implied.
@@ -262,6 +387,219 @@ function change(kind: ReleaseChange["kind"], id: string): ReleaseChange {
   assert.equal(formatReleaseDate("not-a-date"), "not-a-date");
   assert.notEqual(formatReleaseDate("2026-10-18T00:00:00Z"), "Invalid Date");
   assert.equal(channelLabel("preview"), "Preview");
+}
+
+// The feed tells one pull request three ways. Taken from a real alpha, whose
+// 23 entries describe 11 merges: the generated lead, the classified change,
+// and the raw merge commit behind it.
+{
+  const change = (over: Partial<ReleaseChange>): ReleaseChange => ({
+    id: over.id ?? "c",
+    kind: over.kind ?? "other",
+    summary: over.summary ?? "",
+    evidenceUrl: over.evidenceUrl ?? null,
+  });
+  const raw: ReleaseChange[] = [
+    change({ id: "1", summary: "Documented change: Guard 3.53.0a3 retires the Python shim." }),
+    change({
+      id: "2",
+      kind: "fixed",
+      summary: "**runtime**: retire the Python data-flow projection shim (#5496)",
+      evidenceUrl: "https://github.com/hashgraph-online/hol-guard/pull/5496",
+    }),
+    change({
+      id: "3",
+      summary: "Merged pull request #5496: refactor(runtime): retire the Python shim (#5496)",
+      evidenceUrl: "https://github.com/hashgraph-online/hol-guard/pull/5496",
+    }),
+    change({ id: "4", kind: "security", summary: "Bound the release feed response (#5500)" }),
+  ];
+  const deduped = dedupeChanges(raw, true);
+  assert.deepEqual(
+    deduped.map((entry) => entry.id),
+    ["2", "4"],
+    "one entry per pull request, keeping the classified prose",
+  );
+  // The merge-commit restatement wins nothing even when it arrives first.
+  assert.equal(dedupeChanges([raw[2], raw[1]], true)[0].id, "2");
+  // Without notes the generated lead is the only prose there is, so it stays.
+  assert.equal(dedupeChanges(raw, false).length, 3);
+  // An entry naming no pull request cannot be folded into another.
+  const loose = [change({ id: "a", summary: "Rebuilt the catalog" }), change({ id: "b", summary: "Rotated keys" })];
+  assert.equal(dedupeChanges(loose, true).length, 2);
+}
+
+// Seventeen files for one alpha: the platform someone is on, then provenance.
+{
+  const asset = (name: string) => ({ name, url: `https://example.test/${name}` });
+  const { groups, provenance } = groupReleaseAssets([
+    asset("hol-guard-core-3.53.0a3-aarch64-apple-darwin"),
+    asset("hol-guard-core-3.53.0a3-aarch64-apple-darwin.attested.json"),
+    asset("hol-guard-core-3.53.0a3-x86_64-unknown-linux-gnu"),
+    asset("hol_guard-3.53.0a3-py3-none-win_amd64.whl"),
+    asset("hol_guard-3.53.0a3-py3-none-any.whl"),
+    asset("hol-guard-v3.53.0a3.intoto.jsonl"),
+    asset("something-else.bin"),
+  ]);
+  assert.deepEqual(
+    groups.map((group) => [group.label, group.assets.length]),
+    [
+      ["macOS", 1],
+      ["Linux", 1],
+      ["Windows", 1],
+      ["Any platform", 1],
+      ["Other files", 1],
+    ],
+  );
+  assert.equal(provenance.length, 2, "attestations are evidence, not downloads");
+}
+
+// The rail groups a page of versions by the train they belong to.
+{
+  const groups = groupReleasesByTrain([
+    summary({ slug: "a", versionLabel: "3.53.1", train: "3.53" }),
+    summary({ slug: "b", versionLabel: "3.53.0", train: "3.53" }),
+    summary({ slug: "c", versionLabel: "3.52.0", train: "3.52" }),
+  ]);
+  assert.deepEqual(
+    groups.map((group) => [group.train, group.releases.length]),
+    [
+      ["3.53", 2],
+      ["3.52", 1],
+    ],
+  );
+}
+
+// Contributor chips are derived here rather than fetched from GitHub, so the
+// screen stays on the device's own origin.
+{
+  const contributor = (over: Partial<ReleaseContributor>): ReleaseContributor =>
+    ({
+      creditId: "x",
+      contributorType: "human",
+      login: "zerocodefast",
+      displayName: null,
+      githubNumericId: 4211,
+      roles: ["author"],
+      verificationMethod: "pull-request-author",
+      evidenceUrl: null,
+      ...over,
+    }) as ReleaseContributor;
+  assert.equal(contributorMonogram(contributor({})), "ZE");
+  assert.equal(contributorMonogram(contributor({ login: "a", displayName: null })), "A");
+  // A login of nothing but punctuation still produces a chip.
+  assert.equal(contributorMonogram(contributor({ login: "---" })), "?");
+  // The same contributor always gets the same tone, across releases.
+  assert.equal(contributorTone(contributor({})), contributorTone(contributor({})));
+}
+
+// One credit row per change folds into one person per release.
+{
+  const credit = (over: Partial<ReleaseContributor>): ReleaseContributor =>
+    ({
+      creditId: "c",
+      contributorType: "human",
+      login: "zerocodefast",
+      displayName: null,
+      githubNumericId: 4211,
+      roles: ["implementation"],
+      verificationMethod: "pull-request-author",
+      evidenceUrl: null,
+      ...over,
+    }) as ReleaseContributor;
+
+  const roster = mergeContributors([
+    credit({ creditId: "1" }),
+    credit({ creditId: "2", roles: ["implementation", "tests"] }),
+    credit({ creditId: "3", roles: ["docs"] }),
+    credit({ creditId: "4", login: "someone-else", githubNumericId: 99, roles: ["review"] }),
+  ]);
+  assert.equal(roster.length, 2);
+  assert.equal(roster[0].login, "zerocodefast");
+  assert.equal(roster[0].credits, 3);
+  assert.deepEqual(roster[0].roles, ["docs", "implementation", "tests"]);
+  assert.equal(roster[1].credits, 1);
+
+  // The strongest proof a person has carries the chip.
+  const promoted = mergeContributors([
+    credit({ creditId: "1", verificationMethod: "verified-coauthor", evidenceUrl: null }),
+    credit({ creditId: "2", evidenceUrl: "https://github.com/o/r/pull/5" }),
+  ]);
+  assert.equal(promoted[0].verificationMethod, "pull-request-author");
+  assert.equal(promoted[0].evidenceUrl, "https://github.com/o/r/pull/5");
+}
+
+// Two pull requests that both cite the same issue are two changes: the key
+// has to come from the pull request, not from the first number in the line.
+{
+  const change = (over: Partial<ReleaseChange>): ReleaseChange => ({
+    id: over.id ?? "x",
+    kind: over.kind ?? "other",
+    summary: over.summary ?? "",
+    evidenceUrl: over.evidenceUrl ?? null,
+  });
+  const deduped = dedupeChanges(
+    [
+      change({ id: "1", summary: "fix(native): close #5400 for the resident (#5501)" }),
+      change({ id: "2", summary: "fix(dashboard): close #5400 for the panel (#5502)" }),
+    ],
+    true,
+  );
+  assert.equal(deduped.length, 2, "distinct pull requests citing one issue stay distinct");
+  // The evidence URL outranks any number in the prose.
+  const byUrl = dedupeChanges(
+    [
+      change({ id: "3", summary: "Rework #5400 (#5501)", evidenceUrl: "https://github.com/o/r/pull/5600" }),
+      change({ id: "4", summary: "Rework again (#5502)", evidenceUrl: "https://github.com/o/r/pull/5600" }),
+    ],
+    true,
+  );
+  assert.equal(byUrl.length, 1);
+  // A merge commit names its pull request first, so it still folds into the
+  // classified entry even when the title cites an issue after it.
+  const merged = dedupeChanges(
+    [
+      change({ id: "5", kind: "fixed", summary: "**runtime**: fix the crash from #12 (#5496)" }),
+      change({ id: "6", summary: "Merged pull request #5496: fix the crash from #12" }),
+    ],
+    true,
+  );
+  assert.deepEqual(
+    merged.map((entry) => entry.id),
+    ["5"],
+    "a merge restatement keys on its own pull request, not the issue it cites",
+  );
+}
+
+// A roster row that resolved the person outranks one that did not: the chip
+// must not keep an unresolved type or a missing link when a sibling has them.
+{
+  const credit = (over: Partial<ReleaseContributor>): ReleaseContributor =>
+    ({
+      creditId: "c",
+      type: "unresolved",
+      login: null,
+      githubNumericId: 7788,
+      roles: ["implementation"],
+      verificationMethod: "verified-coauthor",
+      evidenceUrl: null,
+      ...over,
+    }) as ReleaseContributor;
+
+  const merged = mergeContributors([
+    credit({ creditId: "1" }),
+    credit({ creditId: "2", type: "human", login: "kantorcodes", evidenceUrl: "https://github.com/o/r/pull/9" }),
+  ]);
+  assert.equal(merged[0].login, "kantorcodes");
+  assert.equal(merged[0].type, "human");
+  assert.equal(merged[0].evidenceUrl, "https://github.com/o/r/pull/9");
+
+  // Stronger proof without a link must not cost the contributor the link.
+  const kept = mergeContributors([
+    credit({ creditId: "1", type: "human", login: "kantorcodes", evidenceUrl: "https://github.com/o/r/pull/9" }),
+    credit({ creditId: "2", type: "human", login: "kantorcodes", verificationMethod: "pull-request-author" }),
+  ]);
+  assert.equal(kept[0].evidenceUrl, "https://github.com/o/r/pull/9");
 }
 
 console.log("releases-model.test.ts passed");

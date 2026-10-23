@@ -7,7 +7,8 @@ import { resolveView, viewTitle } from "../app";
 import { SHELL_NAV_ITEMS, canonicalNavigationView, navigationItemForView } from "../shell-navigation-model";
 import { ReleaseArchiveList } from "./components/release-archive-list";
 import { ReleaseDetailPanel } from "./components/release-detail-panel";
-import { WhatsNewCard } from "./components/whats-new-card";
+import { ReleaseStatusBand } from "./components/release-status-band";
+import { installedStanding } from "./releases-model";
 import type { ReleaseDetail, ReleaseIndex, ReleaseSummary } from "./releases-types";
 
 const coverage = {
@@ -109,14 +110,87 @@ const detail: ReleaseDetail = {
   assert.match(layout, /props\.view === "releases"/);
 }
 
-// What's new names the installed version and offers a way out of the card.
+// Dismissal belongs to the release the call names, not to the one this device
+// runs. Keyed on the installed version, a reader who dismissed the call for
+// one release would never be offered the next while they stayed put.
 {
-  const markup = renderToStaticMarkup(
-    createElement(WhatsNewCard, { release: installed, onRead: () => {}, onDismiss: () => {} }),
+  const workspace = readFileSync(new URL("../releases/releases-workspace.tsx", import.meta.url), "utf8");
+  assert.match(workspace, /const targetLabel = standingTarget\?\.versionLabel \?\? null;/);
+  assert.match(workspace, /isWhatsNewDismissed\(targetLabel\)/);
+  assert.match(workspace, /dismissWhatsNew\(targetLabel\);/);
+  assert.ok(
+    !workspace.includes("isWhatsNewDismissed(installedLabel)"),
+    "dismissal is not keyed on the installed version",
   );
-  assert.match(markup, /What&#x27;s new in Guard 3.53.0/);
-  assert.match(markup, /Read the notes/);
-  assert.match(markup, /aria-label="Dismiss what&#x27;s new in Guard 3.53.0"/);
+}
+
+// The rail's arrow keys belong to the rail. On the <nav> they also caught the
+// pager below it, so paging with the keyboard threw the reader back into the
+// list and changed the release under them.
+{
+  const rail = readFileSync(
+    new URL("../releases/components/release-archive-list.tsx", import.meta.url),
+    "utf8",
+  );
+  const nav = rail.slice(rail.indexOf("<nav "), rail.indexOf(">", rail.indexOf("<nav ")));
+  assert.ok(!nav.includes("onKeyDown"), "the landmark does not take the rail's keys");
+  assert.match(rail, /overflow-y-auto[^"]*" onKeyDown=\{onKeyDown\}/);
+  // Movement starts at the row the reader is on, not at a selection that can
+  // move under them when the installed version arrives after the archive.
+  assert.match(rail, /let origin = selectedSlug;/);
+  assert.match(rail, /if \(node === event\.target\)/);
+}
+
+// The band answers the question the archive exists for — am I current, and
+// if not by how much — and it is the page's own heading while it does.
+{
+  const current = renderToStaticMarkup(
+    createElement(ReleaseStatusBand, {
+      standing: installedStanding(index, "3.53.0"),
+      onRead: () => {},
+      onDismiss: () => {},
+    }),
+  );
+  assert.match(current, /<h1[^>]*id="releases-standing-heading"/, "the band is the page heading");
+  assert.match(current, />3.53.0</);
+  assert.match(current, /newest published release/);
+  assert.match(current, /Read the notes/);
+
+  // Behind: the gap is stated as a count and the call names where to go.
+  const behind = renderToStaticMarkup(
+    createElement(ReleaseStatusBand, {
+      standing: installedStanding(index, "3.52.0"),
+      onRead: () => {},
+      onDismiss: () => {},
+    }),
+  );
+  assert.match(behind, /One newer release has been published since\./);
+  assert.match(behind, /What&#x27;s new in 3.53.0/);
+  assert.match(behind, /aria-label="Dismiss What&#x27;s new in 3.53.0"/);
+
+  // Dismissal silences the call, never the status.
+  const dismissed = renderToStaticMarkup(
+    createElement(ReleaseStatusBand, {
+      standing: installedStanding(index, "3.52.0"),
+      onRead: () => {},
+      onDismiss: () => {},
+      ctaDismissed: true,
+    }),
+  );
+  assert.match(dismissed, /One newer release has been published since\./);
+  assert.ok(!dismissed.includes("What&#x27;s new in"), "the dismissed call does not return");
+
+  // Nothing installed yet, and a version the page does not hold: the band
+  // still renders, and still claims only what it knows.
+  const unknown = renderToStaticMarkup(
+    createElement(ReleaseStatusBand, { standing: installedStanding(index, null) }),
+  );
+  assert.match(unknown, /published releases/);
+  assert.ok(!unknown.includes("Read the notes"), "nothing to open, nothing to offer");
+  const offPage = renderToStaticMarkup(
+    createElement(ReleaseStatusBand, { standing: installedStanding(index, "3.0.57") }),
+  );
+  assert.match(offPage, /not on this page of the archive/);
 }
 
 // The archive marks the version running here and labels a preview build.
@@ -137,6 +211,44 @@ const detail: ReleaseDetail = {
   assert.match(markup, /aria-label="Published Guard releases"/);
   // Both paging controls are disabled on a single-page archive.
   assert.equal(markup.match(/disabled=""/g)?.length, 2);
+  // Twenty versions must not cost twenty tabs to walk past: the rail takes
+  // one stop, and the arrow keys do the rest.
+  assert.equal(markup.match(/tabindex="0"/g)?.length, 1, "the rail is one tab stop");
+  assert.equal(markup.match(/tabindex="-1"/g)?.length, 1);
+  // The release the publisher points at is marked, but not on top of the
+  // mark for the one already running here.
+  assert.ok(
+    !markup.includes("Recommended"),
+    "the installed release is not also told to upgrade to itself",
+  );
+}
+
+// Recommended is worth saying on a release the reader is not already running.
+{
+  const markup = renderToStaticMarkup(
+    createElement(ReleaseArchiveList, {
+      index,
+      selectedSlug: "v3-52-0",
+      installedSlug: "v3-52-0",
+      onSelect: () => {},
+      onPage: () => {},
+    }),
+  );
+  assert.match(markup, /Recommended/);
+}
+
+// With nothing open yet the rail still has to be reachable from the keyboard.
+{
+  const markup = renderToStaticMarkup(
+    createElement(ReleaseArchiveList, {
+      index,
+      selectedSlug: null,
+      installedSlug: null,
+      onSelect: () => {},
+      onPage: () => {},
+    }),
+  );
+  assert.equal(markup.match(/tabindex="0"/g)?.length, 1, "the rail keeps its one tab stop");
 }
 
 // The detail renders changes security-first, the verified roster with its
@@ -202,8 +314,14 @@ const detail: ReleaseDetail = {
     sourceNotes: null,
   };
   const markup = renderToStaticMarkup(createElement(ReleaseDetailPanel, { detail: real }));
-  assert.match(markup, />Guard 3.0.99</);
+  assert.match(markup, />3.0.99</);
   assert.ok(!markup.includes("Guard v3.0.99"), "the v is not doubled onto the label");
+  assert.ok(
+    !markup.includes(">v3.0.99<br"),
+    "a title that only repeats the version is not printed twice",
+  );
+  // The tally says how much there is to read before the reader scrolls.
+  assert.match(markup, /1 security · 1 fixed/);
   assert.match(markup, /does not cover every release/, "partial history is stated");
   assert.ok(!markup.includes("Downloads"), "a release with no assets shows no downloads");
 
@@ -233,6 +351,113 @@ const detail: ReleaseDetail = {
   );
   assert.match(workspace, /const whatsNewDismissed =/);
   assert.match(workspace, /\}, \[page, reloadToken\]\);/, "the archive read pages, nothing else");
+}
+
+// hol.org publishes the Markdown a maintainer wrote. The panel renders it as
+// structure, and never as markup: no path from upstream bytes to innerHTML.
+{
+  const markup = renderToStaticMarkup(
+    createElement(ReleaseDetailPanel, {
+      detail: {
+        ...detail,
+        sourceNotes: {
+          scope: "exact_release",
+          text: [
+            "## Fixes",
+            "",
+            "- **runtime**: retire the shim ([#5496](https://github.com/hashgraph-online/hol-guard/pull/5496))",
+            "",
+            "## Install",
+            "",
+            "```bash",
+            "hol-guard update --alpha",
+            "```",
+            "",
+            "<img src=x onerror=alert(1)>",
+          ].join("\n"),
+        },
+      },
+    }),
+  );
+  assert.match(markup, /<h5[^>]*>(<span>)?Fixes</, "a heading is a heading");
+  assert.match(markup, /<li[^>]*>.*<strong[^>]*>(<span>)?runtime</s, "a list item with bold text");
+  assert.match(
+    markup,
+    /href="https:\/\/github.com\/hashgraph-online\/hol-guard\/pull\/5496"/,
+    "the link resolves",
+  );
+  assert.match(markup, /<pre[^>]*>.*hol-guard update --alpha/s, "a fenced command is a code block");
+  assert.ok(!markup.includes("<img src=x"), "upstream HTML never becomes markup");
+  assert.match(markup, /&lt;img src=x onerror=alert\(1\)&gt;/, "it survives as its own text");
+  // The same release is not told three times over: the derived list is there,
+  // one disclosure away, rather than repeating the notes down the page.
+  assert.match(markup, /<details[^>]*>/, "the itemised list is collapsed behind the notes");
+}
+
+// Asked for a release the reader has installed, the panel says so.
+{
+  const markup = renderToStaticMarkup(
+    createElement(ReleaseDetailPanel, { detail, isInstalled: true }),
+  );
+  assert.match(markup, /Running here/);
+}
+
+// Notes published for the whole series describe the series, so this release's
+// own summary and its documented changes stay on the page beside them.
+{
+  const markup = renderToStaticMarkup(
+    createElement(ReleaseDetailPanel, {
+      detail: {
+        ...detail,
+        summary: "Extensions are now the first thing you see.",
+        changes: [
+          ...detail.changes,
+          {
+            id: "doc-1",
+            kind: "other" as const,
+            summary: "Documented change: the sidebar groups extensions first.",
+            evidenceUrl: null,
+          },
+        ],
+        sourceNotes: {
+          scope: "train_overview",
+          text: "## 3.53 series\n\n- Rolling notes for the series.",
+        },
+      },
+    }),
+  );
+  assert.match(markup, /Extensions are now the first thing you see\./, "the release summary survives series notes");
+  assert.match(markup, /the sidebar groups extensions first/, "a documented change is the only record of this version");
+  assert.ok(
+    !markup.includes("Itemised changes"),
+    "series notes do not speak for this release, so the change list is not collapsed behind them",
+  );
+}
+
+// Muted copy on this screen carries the only record of what changed. On white,
+// brand-dark/75 is the lightest tone that clears 4.5:1; anything lighter here
+// is an icon, not a sentence.
+{
+  const sources = [
+    "components/release-status-band.tsx",
+    "components/release-archive-list.tsx",
+    "components/release-detail-panel.tsx",
+    "components/release-notes.tsx",
+    "releases-workspace.tsx",
+    "releases-model.ts",
+  ];
+  for (const file of sources) {
+    const source = readFileSync(new URL(file, import.meta.url), "utf8");
+    for (const line of source.split("\n")) {
+      if (line.includes("size-")) continue; // icon sizing on the same element: a graphic, not body text
+      for (const [, tone] of line.matchAll(/text-brand-dark\/(\d+)/g)) {
+        assert.ok(
+          Number(tone) >= 75,
+          `${file} uses text-brand-dark/${tone} for text, below the contrast floor`,
+        );
+      }
+    }
+  }
 }
 
 console.log("releases-ui.test.tsx passed");

@@ -7757,7 +7757,7 @@ def test_guard_hook_emits_copilot_native_allow_response_for_benign_find_exec_del
     output = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert output["approval_reuse"]["action"] == "block"
+    assert output == {"permissionDecision": "allow"}
 
 
 def test_guard_hook_emits_copilot_native_allow_response_for_wrapped_command_split_string_argument(
@@ -8051,7 +8051,7 @@ def test_guard_hook_emits_copilot_native_allow_response_for_benign_find_ok_delet
     output = json.loads(capsys.readouterr().out)
 
     assert rc == 0
-    assert output["approval_reuse"]["action"] == "block"
+    assert output == {"permissionDecision": "allow"}
 
 
 def test_guard_hook_emits_copilot_native_allow_response_for_perl_sleep_wait(
@@ -14186,22 +14186,25 @@ def test_guard_run_headless_waits_for_local_approval_and_resumes(tmp_path, capsy
     worker = threading.Thread(target=resolve_pending, daemon=True)
     worker.start()
 
-    rc = main(
-        [
-            "guard",
-            "run",
-            "claude-code",
-            "--home",
-            str(home_dir),
-            "--workspace",
-            str(workspace_dir),
-        ]
-    )
-    stop_resolver.set()
-    worker.join(timeout=1.0)
-    output = capsys.readouterr().out
+    try:
+        rc = main(
+            [
+                "guard",
+                "run",
+                "claude-code",
+                "--home",
+                str(home_dir),
+                "--workspace",
+                str(workspace_dir),
+            ]
+        )
+    finally:
+        stop_resolver.set()
+        worker.join(timeout=1.0)
+    captured = capsys.readouterr()
+    output = captured.out
 
-    assert rc == 0
+    assert rc == 0, f"guard run returned {rc}\nstdout:\n{output}\nstderr:\n{captured.err}"
     assert "Launch allowed" in output
     assert "Approval received" in output
     assert observed_actions
